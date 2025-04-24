@@ -9,16 +9,16 @@
 #define INDENT_CHAR ' '
 #define INDENT_WIDTH 2
 
-typedef struct pretty_buffer {
+typedef struct buffer {
     char *data;      
     size_t size;       
     size_t capacity;    
     int indent_level;   
-} pretty_buffer;
+} buffer;
 
 
 static void
-buffer_init(pretty_buffer *buffer) {
+buffer_init(buffer *buffer) {
     buffer->capacity = 1024; 
     buffer->data = (char *)malloc(buffer->capacity);
     buffer->size = 0;
@@ -30,7 +30,7 @@ buffer_init(pretty_buffer *buffer) {
 
 
 static void
-buffer_free(pretty_buffer *buffer) {
+buffer_free(buffer *buffer) {
     if (buffer->data) {
         free(buffer->data);
         buffer->data = NULL;
@@ -41,7 +41,7 @@ buffer_free(pretty_buffer *buffer) {
 
 
 static void
-buffer_ensure_capacity(pretty_buffer *buffer, size_t additional) {
+buffer_ensure_capacity(buffer *buffer, size_t additional) {
     if (buffer->size + additional >= buffer->capacity) {
         size_t new_capacity = buffer->capacity * 2;
         while (buffer->size + additional >= new_capacity) {
@@ -57,7 +57,7 @@ buffer_ensure_capacity(pretty_buffer *buffer, size_t additional) {
 
 
 static void
-buffer_append_string(pretty_buffer *buffer, const char *str) {
+buffer_append_string(buffer *buffer, const char *str) {
     size_t len = strlen(str);
     buffer_ensure_capacity(buffer, len + 1);
     strcpy(buffer->data + buffer->size, str);
@@ -65,7 +65,7 @@ buffer_append_string(pretty_buffer *buffer, const char *str) {
 }
 
 static void
-buffer_append_format(pretty_buffer *buffer, const char *format, ...) {
+buffer_append_format(buffer *buffer, const char *format, ...) {
     va_list args;
     va_start(args, format);
     
@@ -89,7 +89,7 @@ buffer_append_format(pretty_buffer *buffer, const char *format, ...) {
 }
 
 static void
-buffer_append_indent(pretty_buffer *buffer) {
+buffer_append_indent(buffer *buffer) {
     int spaces = buffer->indent_level * INDENT_WIDTH;
     buffer_ensure_capacity(buffer, spaces + 1);
     
@@ -100,31 +100,31 @@ buffer_append_indent(pretty_buffer *buffer) {
 }
 
 static void
-buffer_indent(pretty_buffer *buffer) {
+buffer_indent(buffer *buffer) {
     buffer->indent_level++;
 }
 
 static void
-buffer_unindent(pretty_buffer *buffer) {
+buffer_unindent(buffer *buffer) {
     if (buffer->indent_level > 0) {
         buffer->indent_level--;
     }
 }
 
-static void serialize_value(lua_State *L, pretty_buffer *buffer, int index);
+static void serialize_value(lua_State *L, buffer *buffer, int index);
 
 static void
-serialize_nil(pretty_buffer *buffer) {
+serialize_nil(buffer *buffer) {
     buffer_append_string(buffer, "nil");
 }
 
 static void
-serialize_boolean(pretty_buffer *buffer, int boolean) {
+serialize_boolean(buffer *buffer, int boolean) {
     buffer_append_string(buffer, boolean ? "true" : "false");
 }
 
 static void
-serialize_number(lua_State *L, pretty_buffer *buffer, int index) {
+serialize_number(lua_State *L, buffer *buffer, int index) {
     if (lua_isinteger(L, index)) {
         lua_Integer i = lua_tointeger(L, index);
         buffer_append_format(buffer, "%lld", (long long)i);
@@ -135,7 +135,7 @@ serialize_number(lua_State *L, pretty_buffer *buffer, int index) {
 }
 
 static void
-serialize_string(pretty_buffer *buffer, const char *str, size_t len) {
+serialize_string(buffer *buffer, const char *str, size_t len) {
     buffer_append_string(buffer, "\"");
     
     for (size_t i = 0; i < len; i++) {
@@ -162,7 +162,29 @@ serialize_string(pretty_buffer *buffer, const char *str, size_t len) {
 }
 
 static void
-serialize_table(lua_State *L, pretty_buffer *buffer, int index) {
+serialize_string_as_key(buffer *buffer, const char *str, size_t len) {
+    for (size_t i = 0; i < len; i++) {
+        char c = str[i];
+        switch (c) {
+            case '\\': buffer_append_string(buffer, "\\\\"); break;
+            case '\n': buffer_append_string(buffer, "\\n"); break;
+            case '\r': buffer_append_string(buffer, "\\r"); break;
+            case '\t': buffer_append_string(buffer, "\\t"); break;
+            default:
+                if ((unsigned char)c < 32 || c == 127) {
+                    buffer_append_format(buffer, "\\x%02x", (unsigned char)c);
+                } else {
+                    buffer_ensure_capacity(buffer, 2);
+                    buffer->data[buffer->size++] = c;
+                    buffer->data[buffer->size] = '\0';
+                }
+                break;
+        }
+    }
+}
+
+static void
+serialize_table(lua_State *L, buffer *buffer, int index) {
     if (index < 0) {
         index = lua_gettop(L) + index + 1;
     }
@@ -192,6 +214,7 @@ serialize_table(lua_State *L, pretty_buffer *buffer, int index) {
     }
     
     lua_pushnil(L);
+    
     while (lua_next(L, index) != 0) {
         if (lua_type(L, -2) == LUA_TNUMBER && 
             lua_isinteger(L, -2)) {
@@ -213,9 +236,15 @@ serialize_table(lua_State *L, pretty_buffer *buffer, int index) {
         
         buffer_append_indent(buffer);
         
-        buffer_append_string(buffer, "[");
-        serialize_value(L, buffer, -2);
-        buffer_append_string(buffer, "] = ");
+        if (lua_type(L, -2) == LUA_TSTRING) {
+            size_t len;
+            const char *str = lua_tolstring(L, -2, &len);
+            serialize_string_as_key(buffer, str, len);
+        } else {
+            serialize_value(L, buffer, -2);
+        }
+        
+        buffer_append_string(buffer, " = ");
         
         serialize_value(L, buffer, -1);
         
@@ -229,12 +258,12 @@ serialize_table(lua_State *L, pretty_buffer *buffer, int index) {
 }
 
 static void
-serialize_userdata(pretty_buffer *buffer, void *p) {
+serialize_userdata(buffer *buffer, void *p) {
     buffer_append_format(buffer, "userdata(%p)", p);
 }
 
 static void
-serialize_value(lua_State *L, pretty_buffer *buffer, int index) {
+serialize_value(lua_State *L, buffer *buffer, int index) {
     int type = lua_type(L, index);
     
     switch (type) {
@@ -267,7 +296,7 @@ serialize_value(lua_State *L, pretty_buffer *buffer, int index) {
 
 static int
 serialize_pretty(lua_State *L) {
-    pretty_buffer buffer;
+    buffer buffer;
     buffer_init(&buffer);
     
     int nargs = lua_gettop(L);
