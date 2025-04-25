@@ -1,13 +1,23 @@
 #include <lua.h>    
 #include <lauxlib.h>  
 #include <stdlib.h>   
-#include <stdint.h>  
-#include <assert.h>    
 #include <string.h>   
 #include <stdio.h>  
 
 #define INDENT_CHAR ' '
 #define INDENT_WIDTH 2
+
+/* 字符串常量宏定义 */
+#define STR_NIL "nil"
+#define STR_TRUE "true"
+#define STR_FALSE "false"
+#define STR_COMMA_NEWLINE ",\n"
+#define STR_EQUALS " = "
+#define STR_NIL_NOT_TABLE "nil /* not a table */"
+#define STR_TABLE_BEGIN "{\n"
+#define STR_NEWLINE "\n"
+#define STR_TABLE_END "}"
+#define STR_UNSUPPORTED "unsupported "
 
 typedef struct buffer {
     char *data;      
@@ -60,32 +70,17 @@ static void
 buffer_append_string(buffer *buffer, const char *str) {
     size_t len = strlen(str);
     buffer_ensure_capacity(buffer, len + 1);
-    strcpy(buffer->data + buffer->size, str);
+    memcpy(buffer->data + buffer->size, str, len);
     buffer->size += len;
+    buffer->data[buffer->size] = '\0';
 }
 
 static void
-buffer_append_format(buffer *buffer, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    
-    va_list args_copy;
-    va_copy(args_copy, args);
-    
-    int len = vsnprintf(NULL, 0, format, args_copy);
-    va_end(args_copy);
-    
-    if (len < 0) {
-        va_end(args);
-        return;
-    }
-    
+buffer_append_binary(buffer *buffer, const void *data, size_t len) {
     buffer_ensure_capacity(buffer, len + 1);
-    
-    vsnprintf(buffer->data + buffer->size, len + 1, format, args);
+    memcpy(buffer->data + buffer->size, data, len);
     buffer->size += len;
-    
-    va_end(args);
+    buffer->data[buffer->size] = '\0';
 }
 
 static void
@@ -93,9 +88,8 @@ buffer_append_indent(buffer *buffer) {
     int spaces = buffer->indent_level * INDENT_WIDTH;
     buffer_ensure_capacity(buffer, spaces + 1);
     
-    for (int i = 0; i < spaces; i++) {
-        buffer->data[buffer->size++] = INDENT_CHAR;
-    }
+    memset(buffer->data + buffer->size, INDENT_CHAR, spaces);
+    buffer->size += spaces;
     buffer->data[buffer->size] = '\0';
 }
 
@@ -115,92 +109,70 @@ static void serialize_value(lua_State *L, buffer *buffer, int index);
 
 static void
 serialize_nil(buffer *buffer) {
-    buffer_append_string(buffer, "nil");
+    buffer_append_string(buffer, STR_NIL);
 }
 
 static void
 serialize_boolean(buffer *buffer, int boolean) {
-    buffer_append_string(buffer, boolean ? "true" : "false");
+    buffer_append_string(buffer, boolean ? STR_TRUE : STR_FALSE);
 }
 
 static void
 serialize_number(lua_State *L, buffer *buffer, int index) {
     if (lua_isinteger(L, index)) {
         lua_Integer i = lua_tointeger(L, index);
-        buffer_append_format(buffer, "%lld", (long long)i);
+        char temp[32];
+        int len = 0;
+        
+        // 处理负数
+        if (i < 0) {
+            temp[len++] = '-';
+            i = -i; // 转为正数处理
+        }
+        
+        // 处理0的特殊情况
+        if (i == 0) {
+            temp[len++] = '0';
+        } else {
+            // 先反向存储数字
+            char digits[20]; // 足够存储64位整数
+            int digit_count = 0;
+            while (i > 0) {
+                digits[digit_count++] = '0' + (i % 10);
+                i /= 10;
+            }
+            
+            // 将数字正向写入结果
+            for (int j = digit_count - 1; j >= 0; j--) {
+                temp[len++] = digits[j];
+            }
+        }
+        
+        buffer_append_binary(buffer, temp, len);
     } else {
         lua_Number n = lua_tonumber(L, index);
-        buffer_append_format(buffer, "%g", n);
+        char temp[32];
+        int len = snprintf(temp, sizeof(temp), "%g", n);
+        buffer_append_binary(buffer, temp, len);
     }
 }
 
 static void
-serialize_string(buffer *buffer, const char *str, size_t len) {
-    buffer_append_string(buffer, "\"");
-    
-    for (size_t i = 0; i < len; i++) {
-        char c = str[i];
-        switch (c) {
-            case '\\': buffer_append_string(buffer, "\\\\"); break;
-            case '\"': buffer_append_string(buffer, "\\\""); break;
-            case '\n': buffer_append_string(buffer, "\\n"); break;
-            case '\r': buffer_append_string(buffer, "\\r"); break;
-            case '\t': buffer_append_string(buffer, "\\t"); break;
-            default:
-                if ((unsigned char)c < 32 || c == 127) {
-                    buffer_append_format(buffer, "\\x%02x", (unsigned char)c);
-                } else {
-                    buffer_ensure_capacity(buffer, 2);
-                    buffer->data[buffer->size++] = c;
-                    buffer->data[buffer->size] = '\0';
-                }
-                break;
-        }
-    }
-    
-    buffer_append_string(buffer, "\"");
-}
-
-static void
-serialize_string_as_key(buffer *buffer, const char *str, size_t len) {
-    for (size_t i = 0; i < len; i++) {
-        char c = str[i];
-        switch (c) {
-            case '\\': buffer_append_string(buffer, "\\\\"); break;
-            case '\n': buffer_append_string(buffer, "\\n"); break;
-            case '\r': buffer_append_string(buffer, "\\r"); break;
-            case '\t': buffer_append_string(buffer, "\\t"); break;
-            default:
-                if ((unsigned char)c < 32 || c == 127) {
-                    buffer_append_format(buffer, "\\x%02x", (unsigned char)c);
-                } else {
-                    buffer_ensure_capacity(buffer, 2);
-                    buffer->data[buffer->size++] = c;
-                    buffer->data[buffer->size] = '\0';
-                }
-                break;
-        }
+serialize_string(buffer *buffer, const char *str, size_t len, int is_key) {
+    if (!is_key) {
+        // 直接向缓冲区添加引号和字符串内容
+        buffer_ensure_capacity(buffer, len + 3); // 2个引号 + 内容 + 空终止符
+        buffer->data[buffer->size++] = '"';
+        memcpy(buffer->data + buffer->size, str, len);
+        buffer->size += len;
+        buffer->data[buffer->size++] = '"';
+        buffer->data[buffer->size] = '\0';
+    } else {
+        buffer_append_binary(buffer, str, len);
     }
 }
 
-static void
-serialize_table(lua_State *L, buffer *buffer, int index) {
-    if (index < 0) {
-        index = lua_gettop(L) + index + 1;
-    }
-    
-    if (!lua_istable(L, index)) {
-        buffer_append_string(buffer, "nil /* not a table */");
-        return;
-    }
-    
-    buffer_append_string(buffer, "{\n");
-    buffer_indent(buffer);
-    
-    size_t array_size = lua_rawlen(L, index);
-    int has_array = array_size > 0;
-    int has_hash = 0;
-    
+static void serialize_array_part(lua_State *L, buffer *buffer, int index, size_t array_size) {
     for (size_t i = 1; i <= array_size; i++) {
         buffer_append_indent(buffer);
         
@@ -209,9 +181,13 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
         lua_pop(L, 1);
         
         if (i < array_size) {
-            buffer_append_string(buffer, ",\n");
+            buffer_append_string(buffer, STR_COMMA_NEWLINE);
         }
     }
+}
+
+static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t array_size, int has_array) {
+    int has_hash = 0;
     
     lua_pushnil(L);
     
@@ -226,10 +202,10 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
         }
         
         if (has_array && !has_hash) {
-            buffer_append_string(buffer, ",\n");
+            buffer_append_string(buffer, STR_COMMA_NEWLINE);
             has_hash = 1;
         } else if (has_hash) {
-            buffer_append_string(buffer, ",\n");
+            buffer_append_string(buffer, STR_COMMA_NEWLINE);
         } else {
             has_hash = 1;
         }
@@ -239,27 +215,53 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
         if (lua_type(L, -2) == LUA_TSTRING) {
             size_t len;
             const char *str = lua_tolstring(L, -2, &len);
-            serialize_string_as_key(buffer, str, len);
+            serialize_string(buffer, str, len, 1);
         } else {
             serialize_value(L, buffer, -2);
         }
         
-        buffer_append_string(buffer, " = ");
+        buffer_append_string(buffer, STR_EQUALS);
         
         serialize_value(L, buffer, -1);
         
         lua_pop(L, 1);
     }
+}
+
+static void
+serialize_table(lua_State *L, buffer *buffer, int index) {
+    if (index < 0) {
+        index = lua_gettop(L) + index + 1;
+    }
     
-    buffer_append_string(buffer, "\n");
+    if (!lua_istable(L, index)) {
+        buffer_append_string(buffer, STR_NIL_NOT_TABLE);
+        return;
+    }
+    
+    buffer_append_string(buffer, STR_TABLE_BEGIN);
+    buffer_indent(buffer);
+    
+    size_t array_size = lua_rawlen(L, index);
+    int has_array = array_size > 0;
+    
+    if (has_array) {
+        serialize_array_part(L, buffer, index, array_size);
+    }
+    
+    serialize_hash_part(L, buffer, index, array_size, has_array);
+    
+    buffer_append_string(buffer, STR_NEWLINE);
     buffer_unindent(buffer);
     buffer_append_indent(buffer);
-    buffer_append_string(buffer, "}");
+    buffer_append_string(buffer, STR_TABLE_END);
 }
 
 static void
 serialize_userdata(buffer *buffer, void *p) {
-    buffer_append_format(buffer, "userdata(%p)", p);
+    char temp[64];
+    int len = snprintf(temp, sizeof(temp), "userdata(%p)", p);
+    buffer_append_binary(buffer, temp, len);
 }
 
 static void
@@ -279,7 +281,7 @@ serialize_value(lua_State *L, buffer *buffer, int index) {
         case LUA_TSTRING: {
             size_t len;
             const char *str = lua_tolstring(L, index, &len);
-            serialize_string(buffer, str, len);
+            serialize_string(buffer, str, len, 0);
             break;
         }
         case LUA_TTABLE:
@@ -288,9 +290,13 @@ serialize_value(lua_State *L, buffer *buffer, int index) {
         case LUA_TLIGHTUSERDATA:
             serialize_userdata(buffer, lua_touserdata(L, index));
             break;
-        default:
-            buffer_append_format(buffer, "<%s>", lua_typename(L, type));
+        default: {
+            const char* type_name = lua_typename(L, type);
+            int len = strlen(type_name);
+            buffer_append_string(buffer, STR_UNSUPPORTED);
+            buffer_append_binary(buffer, type_name, len);
             break;
+        }
     }
 }
 
@@ -303,7 +309,7 @@ serialize_pretty(lua_State *L) {
     
     for (int i = 1; i <= nargs; i++) {
         if (i > 1) {
-            buffer_append_string(&buffer, "\n");
+            buffer_append_string(&buffer, STR_NEWLINE);
         }
         serialize_value(L, &buffer, i);
     }
