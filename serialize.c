@@ -7,7 +7,8 @@
 #define INDENT_CHAR ' '
 #define INDENT_WIDTH 2
 
-/* 字符串常量宏定义 */
+#define INITIAL_BUFFER_SIZE 4096
+
 #define STR_NIL "nil"
 #define STR_TRUE "true"
 #define STR_FALSE "false"
@@ -29,7 +30,7 @@ typedef struct buffer {
 
 static void
 buffer_init(buffer *buffer) {
-    buffer->capacity = 1024; 
+    buffer->capacity = INITIAL_BUFFER_SIZE; 
     buffer->data = (char *)malloc(buffer->capacity);
     buffer->size = 0;
     buffer->indent_level = 0;
@@ -124,25 +125,21 @@ serialize_number(lua_State *L, buffer *buffer, int index) {
         char temp[32];
         int len = 0;
         
-        // 处理负数
         if (i < 0) {
             temp[len++] = '-';
-            i = -i; // 转为正数处理
+            i = -i; 
         }
         
-        // 处理0的特殊情况
         if (i == 0) {
             temp[len++] = '0';
         } else {
-            // 先反向存储数字
-            char digits[20]; // 足够存储64位整数
+            char digits[20];
             int digit_count = 0;
             while (i > 0) {
                 digits[digit_count++] = '0' + (i % 10);
                 i /= 10;
             }
             
-            // 将数字正向写入结果
             for (int j = digit_count - 1; j >= 0; j--) {
                 temp[len++] = digits[j];
             }
