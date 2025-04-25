@@ -6,6 +6,7 @@
 
 #define INDENT_CHAR ' '
 #define INDENT_WIDTH 2
+#define MAX_INDENT_LEVEL 128  // 最大缩进级别
 
 #define INITIAL_BUFFER_SIZE 4096
 
@@ -19,6 +20,19 @@
 #define STR_NEWLINE "\n"
 #define STR_TABLE_END "}"
 #define STR_UNSUPPORTED "unsupported "
+
+// 缩进缓存
+static char indent_cache[MAX_INDENT_LEVEL * INDENT_WIDTH + 1];
+static int indent_cache_initialized = 0;
+
+// 初始化缩进缓存
+static void init_indent_cache() {
+    if (!indent_cache_initialized) {
+        memset(indent_cache, INDENT_CHAR, MAX_INDENT_LEVEL * INDENT_WIDTH);
+        indent_cache[MAX_INDENT_LEVEL * INDENT_WIDTH] = '\0';
+        indent_cache_initialized = 1;
+    }
+}
 
 typedef struct buffer {
     char *data;      
@@ -37,6 +51,9 @@ buffer_init(buffer *buffer) {
     if (buffer->data) {
         buffer->data[0] = '\0';
     }
+    
+    // // 确保缩进缓存已初始化
+    // init_indent_cache();
 }
 
 
@@ -87,9 +104,16 @@ buffer_append_binary(buffer *buffer, const void *data, size_t len) {
 static void
 buffer_append_indent(buffer *buffer) {
     int spaces = buffer->indent_level * INDENT_WIDTH;
+    
+    // 检查缩进级别是否超出范围
+    if (buffer->indent_level > MAX_INDENT_LEVEL) {
+        spaces = MAX_INDENT_LEVEL * INDENT_WIDTH;
+    }
+    
     buffer_ensure_capacity(buffer, spaces + 1);
     
-    memset(buffer->data + buffer->size, INDENT_CHAR, spaces);
+    // 使用预缓存的缩进字符串
+    memcpy(buffer->data + buffer->size, indent_cache, spaces);
     buffer->size += spaces;
     buffer->data[buffer->size] = '\0';
 }
@@ -319,6 +343,9 @@ serialize_pretty(lua_State *L) {
 
 int
 luaopen_serialize(lua_State *L) {
+    // 确保缩进缓存已初始化
+    init_indent_cache();
+    
     luaL_Reg l[] = {
         { "serialize_pretty", serialize_pretty },
         { NULL, NULL },
