@@ -21,6 +21,18 @@
 #define STR_TABLE_END "}"
 #define STR_UNSUPPORTED "unsupported "
 
+// 字符串长度宏定义
+#define STR_NIL_LEN 3
+#define STR_TRUE_LEN 4
+#define STR_FALSE_LEN 5
+#define STR_COMMA_NEWLINE_LEN 2
+#define STR_EQUALS_LEN 3
+#define STR_NIL_NOT_TABLE_LEN 18
+#define STR_TABLE_BEGIN_LEN 2
+#define STR_NEWLINE_LEN 1
+#define STR_TABLE_END_LEN 1
+#define STR_UNSUPPORTED_LEN 12
+
 // 缩进缓存
 static char indent_cache[MAX_INDENT_LEVEL * INDENT_WIDTH + 1];
 static int indent_cache_initialized = 0;
@@ -85,8 +97,7 @@ buffer_ensure_capacity(buffer *buffer, size_t additional) {
 
 
 static void
-buffer_append_string(buffer *buffer, const char *str) {
-    size_t len = strlen(str);
+buffer_append_string(buffer *buffer, const char *str, size_t len) {
     buffer_ensure_capacity(buffer, len + 1);
     memcpy(buffer->data + buffer->size, str, len);
     buffer->size += len;
@@ -134,12 +145,16 @@ static void serialize_value(lua_State *L, buffer *buffer, int index);
 
 static void
 serialize_nil(buffer *buffer) {
-    buffer_append_string(buffer, STR_NIL);
+    buffer_append_string(buffer, STR_NIL, STR_NIL_LEN);
 }
 
 static void
 serialize_boolean(buffer *buffer, int boolean) {
-    buffer_append_string(buffer, boolean ? STR_TRUE : STR_FALSE);
+    if (boolean) {
+        buffer_append_string(buffer, STR_TRUE, STR_TRUE_LEN);
+    } else {
+        buffer_append_string(buffer, STR_FALSE, STR_FALSE_LEN);
+    }
 }
 
 static void
@@ -202,7 +217,7 @@ static void serialize_array_part(lua_State *L, buffer *buffer, int index, size_t
         lua_pop(L, 1);
         
         if (i < array_size) {
-            buffer_append_string(buffer, STR_COMMA_NEWLINE);
+            buffer_append_string(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
         }
     }
 }
@@ -223,10 +238,10 @@ static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t 
         }
         
         if (has_array && !has_hash) {
-            buffer_append_string(buffer, STR_COMMA_NEWLINE);
+            buffer_append_string(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
             has_hash = 1;
         } else if (has_hash) {
-            buffer_append_string(buffer, STR_COMMA_NEWLINE);
+            buffer_append_string(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
         } else {
             has_hash = 1;
         }
@@ -241,7 +256,7 @@ static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t 
             serialize_value(L, buffer, -2);
         }
         
-        buffer_append_string(buffer, STR_EQUALS);
+        buffer_append_string(buffer, STR_EQUALS, STR_EQUALS_LEN);
         
         serialize_value(L, buffer, -1);
         
@@ -256,11 +271,11 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
     }
     
     if (!lua_istable(L, index)) {
-        buffer_append_string(buffer, STR_NIL_NOT_TABLE);
+        buffer_append_string(buffer, STR_NIL_NOT_TABLE, STR_NIL_NOT_TABLE_LEN);
         return;
     }
     
-    buffer_append_string(buffer, STR_TABLE_BEGIN);
+    buffer_append_string(buffer, STR_TABLE_BEGIN, STR_TABLE_BEGIN_LEN);
     buffer_indent(buffer);
     
     size_t array_size = lua_rawlen(L, index);
@@ -272,10 +287,10 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
     
     serialize_hash_part(L, buffer, index, array_size, has_array);
     
-    buffer_append_string(buffer, STR_NEWLINE);
+    buffer_append_string(buffer, STR_NEWLINE, STR_NEWLINE_LEN);
     buffer_unindent(buffer);
     buffer_append_indent(buffer);
-    buffer_append_string(buffer, STR_TABLE_END);
+    buffer_append_string(buffer, STR_TABLE_END, STR_TABLE_END_LEN);
 }
 
 static void
@@ -314,7 +329,7 @@ serialize_value(lua_State *L, buffer *buffer, int index) {
         default: {
             const char* type_name = lua_typename(L, type);
             int len = strlen(type_name);
-            buffer_append_string(buffer, STR_UNSUPPORTED);
+            buffer_append_string(buffer, STR_UNSUPPORTED, STR_UNSUPPORTED_LEN);
             buffer_append_binary(buffer, type_name, len);
             break;
         }
@@ -330,7 +345,7 @@ serialize_pretty(lua_State *L) {
     
     for (int i = 1; i <= nargs; i++) {
         if (i > 1) {
-            buffer_append_string(&buffer, STR_NEWLINE);
+            buffer_append_string(&buffer, STR_NEWLINE, STR_NEWLINE_LEN);
         }
         serialize_value(L, &buffer, i);
     }
