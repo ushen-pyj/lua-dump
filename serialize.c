@@ -269,7 +269,6 @@ serialize_string(buffer *buffer, const char *str, size_t len) {
 static void serialize_array_part(lua_State *L, buffer *buffer, int index, size_t array_size) {
     for (size_t i = 1; i <= array_size; i++) {
         if (i > 1) {
-            // buffer_append_binary(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
             const void *data_array[2] = {STR_COMMA_NEWLINE, indent_cache};
             size_t len_array[2] = {STR_COMMA_NEWLINE_LEN, GET_INDENT(buffer)};
             buffer_append_binary_array(buffer, data_array, len_array, 2);
@@ -348,9 +347,6 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
     serialize_hash_part(L, buffer, index, array_size, has_array);
     
     buffer_unindent(buffer);
-    // buffer_append_binary(buffer, STR_NEWLINE, STR_NEWLINE_LEN);
-    // buffer_append_indent(buffer);
-    // buffer_append_binary(buffer, STR_TABLE_END, STR_TABLE_END_LEN);
     const void *data_array[3] = {STR_NEWLINE, indent_cache, STR_TABLE_END};
     size_t len_array[3] = {STR_NEWLINE_LEN, GET_INDENT(buffer), STR_TABLE_END_LEN};
     buffer_append_binary_array(buffer, data_array, len_array, 3);
