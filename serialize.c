@@ -9,6 +9,7 @@
 #define MAX_INDENT_LEVEL 32 
 
 #define INITIAL_BUFFER_SIZE 4096
+#define CHUNK_SIZE 4096
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define GET_INDENT(v) (MIN(v->indent_level, MAX_INDENT_LEVEL) * INDENT_WIDTH)
@@ -50,10 +51,13 @@ static void init_indent_cache() {
 }
 
 typedef struct buffer {
-    char *data;      
-    size_t size;       
-    size_t capacity;    
-    int indent_level;   
+    char *data;       // 最终输出缓冲区
+    size_t size;      // 当前数据大小
+    size_t capacity;  // 当前分配容量
+    int indent_level; // 缩进级别
+    
+    char chunk[CHUNK_SIZE]; // 块缓冲区
+    size_t chunk_used;      // 块缓冲区已使用大小
 } buffer;
 
 
@@ -63,6 +67,7 @@ buffer_init(buffer *buffer) {
     buffer->data = (char *)malloc(buffer->capacity);
     buffer->size = 0;
     buffer->indent_level = 0;
+    buffer->chunk_used = 0;
     if (buffer->data) {
         buffer->data[0] = '\0';
     }
@@ -77,9 +82,10 @@ buffer_free(buffer *buffer) {
     }
     buffer->size = 0;
     buffer->capacity = 0;
+    buffer->chunk_used = 0;
 }
 
-
+// 在使用buffer_flush_chunk之前先声明buffer_ensure_capacity
 static void
 buffer_ensure_capacity(buffer *buffer, size_t additional) {
     if (buffer->size + additional >= buffer->capacity) {
@@ -95,12 +101,38 @@ buffer_ensure_capacity(buffer *buffer, size_t additional) {
     }
 }
 
+// 将块缓冲区刷新到主缓冲区
+static void
+buffer_flush_chunk(buffer *buffer) {
+    if (buffer->chunk_used > 0) {
+        buffer_ensure_capacity(buffer, buffer->chunk_used + 1);
+        memcpy(buffer->data + buffer->size, buffer->chunk, buffer->chunk_used);
+        buffer->size += buffer->chunk_used;
+        buffer->data[buffer->size] = '\0';
+        buffer->chunk_used = 0;
+    }
+}
+
 static void
 buffer_append_binary(buffer *buffer, const void *data, size_t len) {
-    buffer_ensure_capacity(buffer, len + 1);
-    memcpy(buffer->data + buffer->size, data, len);
-    buffer->size += len;
-    buffer->data[buffer->size] = '\0';
+    // 如果数据太大无法放入块缓冲区，先刷新块缓冲区
+    if (buffer->chunk_used + len > CHUNK_SIZE) {
+        // 刷新现有块缓冲区
+        buffer_flush_chunk(buffer);
+        
+        // 对于非常大的数据，直接添加到主缓冲区
+        if (len > CHUNK_SIZE) {
+            buffer_ensure_capacity(buffer, len + 1);
+            memcpy(buffer->data + buffer->size, data, len);
+            buffer->size += len;
+            buffer->data[buffer->size] = '\0';
+            return;
+        }
+    }
+    
+    // 将数据添加到块缓冲区
+    memcpy(buffer->chunk + buffer->chunk_used, data, len);
+    buffer->chunk_used += len;
 }
 
 static void
@@ -110,23 +142,40 @@ buffer_append_binary_array(buffer *buffer, const void **data_array, const size_t
         total_len += len_array[i];
     }
     
-    buffer_ensure_capacity(buffer, total_len + 1);
-    
-    for (size_t i = 0; i < count; i++) {
-        memcpy(buffer->data + buffer->size, data_array[i], len_array[i]);
-        buffer->size += len_array[i];
+    // 如果总数据大小无法放入块缓冲区，先刷新块缓冲区
+    if (buffer->chunk_used + total_len > CHUNK_SIZE) {
+        buffer_flush_chunk(buffer);
+        
+        // 对于非常大的数据，直接添加到主缓冲区
+        if (total_len > CHUNK_SIZE) {
+            buffer_ensure_capacity(buffer, total_len + 1);
+            for (size_t i = 0; i < count; i++) {
+                memcpy(buffer->data + buffer->size, data_array[i], len_array[i]);
+                buffer->size += len_array[i];
+            }
+            buffer->data[buffer->size] = '\0';
+            return;
+        }
     }
     
-    buffer->data[buffer->size] = '\0';
+    // 将数据添加到块缓冲区
+    for (size_t i = 0; i < count; i++) {
+        memcpy(buffer->chunk + buffer->chunk_used, data_array[i], len_array[i]);
+        buffer->chunk_used += len_array[i];
+    }
 }
 
 static void
 buffer_append_indent(buffer *buffer) {
     int spaces = GET_INDENT(buffer);
-    buffer_ensure_capacity(buffer, spaces + 1);
-    memcpy(buffer->data + buffer->size, indent_cache, spaces);
-    buffer->size += spaces;
-    buffer->data[buffer->size] = '\0';
+    
+    // 检查块缓冲区容量
+    if (buffer->chunk_used + spaces > CHUNK_SIZE) {
+        buffer_flush_chunk(buffer);
+    }
+    
+    memcpy(buffer->chunk + buffer->chunk_used, indent_cache, spaces);
+    buffer->chunk_used += spaces;
 }
 
 static void
@@ -159,37 +208,54 @@ serialize_boolean(buffer *buffer, int boolean) {
 
 static void
 serialize_number(lua_State *L, buffer *buffer, int index) {
+    // 确保块缓冲区有足够空间存储数字（数字转字符串最多32字节）
+    if (buffer->chunk_used + 32 > CHUNK_SIZE) {
+        buffer_flush_chunk(buffer);
+    }
+    
     if (lua_isinteger(L, index)) {
         lua_Integer i = lua_tointeger(L, index);
-        char temp[32];
+        
+        // 直接在块缓冲区中构建数字字符串
+        char *p = buffer->chunk + buffer->chunk_used;
         int len = 0;
         
         if (i < 0) {
-            temp[len++] = '-';
-            i = -i; 
+            *p++ = '-';
+            len++;
+            i = -i;
         }
         
         if (i == 0) {
-            temp[len++] = '0';
+            *p++ = '0';
+            len++;
         } else {
-            char digits[20]; 
+            // 计算数字长度和转换为字符串
             int digit_count = 0;
-            while (i > 0) {
-                digits[digit_count++] = '0' + (i % 10);
-                i /= 10;
+            
+            lua_Integer temp = i;
+            while (temp > 0) {
+                temp /= 10;
+                digit_count++;
             }
             
-            for (int j = digit_count - 1; j >= 0; j--) {
-                temp[len++] = digits[j];
+            char *q = p + digit_count - 1;
+            temp = i;
+            
+            while (temp > 0) {
+                *q-- = '0' + (temp % 10);
+                temp /= 10;
             }
+            
+            len += digit_count;
+            p += digit_count;
         }
         
-        buffer_append_binary(buffer, temp, len);
+        buffer->chunk_used += len;
     } else {
         lua_Number n = lua_tonumber(L, index);
-        char temp[32];
-        int len = snprintf(temp, sizeof(temp), "%g", n);
-        buffer_append_binary(buffer, temp, len);
+        int len = snprintf(buffer->chunk + buffer->chunk_used, 32, "%g", n);
+        buffer->chunk_used += len;
     }
 }
 
@@ -345,6 +411,9 @@ serialize_pretty(lua_State *L) {
         }
         serialize_value(L, &buffer, i);
     }
+    
+    // 确保所有数据都刷新到主缓冲区
+    buffer_flush_chunk(&buffer);
     
     lua_pushlstring(L, buffer.data, buffer.size);
     
