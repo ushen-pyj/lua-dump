@@ -41,7 +41,6 @@
 
 static char indent_cache[MAX_INDENT_LEVEL * INDENT_WIDTH + 1];
 static int indent_cache_initialized = 0;
-static const char digit_chars[] = "0123456789";
 
 static void init_indent_cache() {
     if (!indent_cache_initialized) {
@@ -217,41 +216,7 @@ serialize_number(lua_State *L, buffer *buffer, int index) {
     if (lua_isinteger(L, index)) {
         lua_Integer i = lua_tointeger(L, index);
         
-        // 直接在块缓冲区中构建数字字符串
-        char *p = buffer->chunk + buffer->chunk_used;
-        int len = 0;
-        
-        if (i < 0) {
-            *p++ = '-';
-            len++;
-            i = -i;
-        }
-        
-        if (i == 0) {
-            *p++ = '0';
-            len++;
-        } else {
-            // 计算数字长度和转换为字符串
-            int digit_count = 0;
-            
-            lua_Integer temp = i;
-            while (temp > 0) {
-                temp /= 10;
-                digit_count++;
-            }
-            
-            char *q = p + digit_count - 1;
-            temp = i;
-            
-            while (temp > 0) {
-                *q-- = digit_chars[temp % 10];
-                temp /= 10;
-            }
-            
-            len += digit_count;
-            p += digit_count;
-        }
-        
+        int len = snprintf(buffer->chunk + buffer->chunk_used, 32, "%lld", i);
         buffer->chunk_used += len;
     } else {
         lua_Number n = lua_tonumber(L, index);
@@ -298,7 +263,7 @@ static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t 
                 continue;
             }
         }
-        
+
         if (has_array && !has_hash) {
             buffer_append_binary(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
             has_hash = 1;
@@ -313,7 +278,7 @@ static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t 
             size_t len;
             const char *str = lua_tolstring(L, -2, &len);
             buffer_append_binary(buffer, str, len);
-        } else {
+        }else {
             serialize_value(L, buffer, -2);
         }
         
