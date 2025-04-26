@@ -6,7 +6,7 @@
 
 #define INDENT_CHAR ' '
 #define INDENT_WIDTH 2
-#define MAX_INDENT_LEVEL 128  // 最大缩进级别
+#define MAX_INDENT_LEVEL 128 
 
 #define INITIAL_BUFFER_SIZE 4096
 
@@ -20,8 +20,8 @@
 #define STR_NEWLINE "\n"
 #define STR_TABLE_END "}"
 #define STR_UNSUPPORTED "unsupported "
+#define STR_SPACE " "
 
-// 字符串长度宏定义
 #define STR_NIL_LEN 3
 #define STR_TRUE_LEN 4
 #define STR_FALSE_LEN 5
@@ -32,12 +32,11 @@
 #define STR_NEWLINE_LEN 1
 #define STR_TABLE_END_LEN 1
 #define STR_UNSUPPORTED_LEN 12
+#define STR_SPACE_LEN 1
 
-// 缩进缓存
 static char indent_cache[MAX_INDENT_LEVEL * INDENT_WIDTH + 1];
 static int indent_cache_initialized = 0;
 
-// 初始化缩进缓存
 static void init_indent_cache() {
     if (!indent_cache_initialized) {
         memset(indent_cache, INDENT_CHAR, MAX_INDENT_LEVEL * INDENT_WIDTH);
@@ -63,9 +62,6 @@ buffer_init(buffer *buffer) {
     if (buffer->data) {
         buffer->data[0] = '\0';
     }
-    
-    // // 确保缩进缓存已初始化
-    // init_indent_cache();
 }
 
 
@@ -95,37 +91,16 @@ buffer_ensure_capacity(buffer *buffer, size_t additional) {
     }
 }
 
-
 static void
-buffer_append_string(buffer *buffer, const char *str, size_t len) {
-    buffer_ensure_capacity(buffer, len + 1);
-    memcpy(buffer->data + buffer->size, str, len);
-    buffer->size += len;
-    buffer->data[buffer->size] = '\0';
-}
-
-static void
-buffer_append_binary(buffer *buffer, const void *data, size_t len) {
-    buffer_ensure_capacity(buffer, len + 1);
-    memcpy(buffer->data + buffer->size, data, len);
-    buffer->size += len;
-    buffer->data[buffer->size] = '\0';
-}
-
-static void
-buffer_append_indent(buffer *buffer) {
-    int spaces = buffer->indent_level * INDENT_WIDTH;
-    
-    // 检查缩进级别是否超出范围
-    if (buffer->indent_level > MAX_INDENT_LEVEL) {
+buffer_append_binary(buffer *buffer, const void *data, size_t len, int indent_level) {
+    int spaces = indent_level * INDENT_WIDTH;
+    if (indent_level > MAX_INDENT_LEVEL) {
         spaces = MAX_INDENT_LEVEL * INDENT_WIDTH;
     }
-    
-    buffer_ensure_capacity(buffer, spaces + 1);
-    
-    // 使用预缓存的缩进字符串
+    buffer_ensure_capacity(buffer, len + spaces + 1);
     memcpy(buffer->data + buffer->size, indent_cache, spaces);
-    buffer->size += spaces;
+    memcpy(buffer->data + buffer->size + spaces, data, len);
+    buffer->size += len + spaces;
     buffer->data[buffer->size] = '\0';
 }
 
@@ -141,24 +116,24 @@ buffer_unindent(buffer *buffer) {
     }
 }
 
-static void serialize_value(lua_State *L, buffer *buffer, int index);
+static void serialize_value(lua_State *L, buffer *buffer, int index, int indent_level);
 
 static void
-serialize_nil(buffer *buffer) {
-    buffer_append_string(buffer, STR_NIL, STR_NIL_LEN);
+serialize_nil(buffer *buffer, int indent_level) {
+    buffer_append_binary(buffer, STR_NIL, STR_NIL_LEN, indent_level);
 }
 
 static void
-serialize_boolean(buffer *buffer, int boolean) {
+serialize_boolean(buffer *buffer, int boolean, int indent_level) {
     if (boolean) {
-        buffer_append_string(buffer, STR_TRUE, STR_TRUE_LEN);
+        buffer_append_binary(buffer, STR_TRUE, STR_TRUE_LEN, indent_level);
     } else {
-        buffer_append_string(buffer, STR_FALSE, STR_FALSE_LEN);
+        buffer_append_binary(buffer, STR_FALSE, STR_FALSE_LEN, indent_level);
     }
 }
 
 static void
-serialize_number(lua_State *L, buffer *buffer, int index) {
+serialize_number(lua_State *L, buffer *buffer, int index, int indent_level) {
     if (lua_isinteger(L, index)) {
         lua_Integer i = lua_tointeger(L, index);
         char temp[32];
@@ -172,7 +147,7 @@ serialize_number(lua_State *L, buffer *buffer, int index) {
         if (i == 0) {
             temp[len++] = '0';
         } else {
-            char digits[20];
+            char digits[20]; 
             int digit_count = 0;
             while (i > 0) {
                 digits[digit_count++] = '0' + (i % 10);
@@ -184,40 +159,44 @@ serialize_number(lua_State *L, buffer *buffer, int index) {
             }
         }
         
-        buffer_append_binary(buffer, temp, len);
+        buffer_append_binary(buffer, temp, len, indent_level);
     } else {
         lua_Number n = lua_tonumber(L, index);
         char temp[32];
         int len = snprintf(temp, sizeof(temp), "%g", n);
-        buffer_append_binary(buffer, temp, len);
+        buffer_append_binary(buffer, temp, len, indent_level);
     }
 }
 
 static void
-serialize_string(buffer *buffer, const char *str, size_t len, int is_key) {
+serialize_string(buffer *buffer, const char *str, size_t len, int is_key, int indent_level) {
     if (!is_key) {
         // 直接向缓冲区添加引号和字符串内容
-        buffer_ensure_capacity(buffer, len + 3); // 2个引号 + 内容 + 空终止符
+        int spaces = indent_level * INDENT_WIDTH;
+        if (indent_level > MAX_INDENT_LEVEL) {
+            spaces = MAX_INDENT_LEVEL * INDENT_WIDTH;
+        }
+        buffer_ensure_capacity(buffer, len + spaces + 3); // 2个引号 + 内容 + 空终止符
+        memcpy(buffer->data + buffer->size, indent_cache, spaces);
+        buffer->size += spaces;
         buffer->data[buffer->size++] = '"';
         memcpy(buffer->data + buffer->size, str, len);
         buffer->size += len;
         buffer->data[buffer->size++] = '"';
         buffer->data[buffer->size] = '\0';
     } else {
-        buffer_append_binary(buffer, str, len);
+        buffer_append_binary(buffer, str, len, indent_level);
     }
 }
 
 static void serialize_array_part(lua_State *L, buffer *buffer, int index, size_t array_size) {
     for (size_t i = 1; i <= array_size; i++) {
-        buffer_append_indent(buffer);
-        
         lua_rawgeti(L, index, i);
-        serialize_value(L, buffer, -1);
+        serialize_value(L, buffer, -1, buffer->indent_level);
         lua_pop(L, 1);
         
         if (i < array_size) {
-            buffer_append_string(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
+            buffer_append_binary(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN, 0);
         }
     }
 }
@@ -226,7 +205,7 @@ static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t 
     int has_hash = 0;
     
     lua_pushnil(L);
-    
+    int indent_level = buffer->indent_level;
     while (lua_next(L, index) != 0) {
         if (lua_type(L, -2) == LUA_TNUMBER && 
             lua_isinteger(L, -2)) {
@@ -238,44 +217,43 @@ static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t 
         }
         
         if (has_array && !has_hash) {
-            buffer_append_string(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
+            buffer_append_binary(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN, 0);
             has_hash = 1;
         } else if (has_hash) {
-            buffer_append_string(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
+            buffer_append_binary(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN, 0);
         } else {
             has_hash = 1;
         }
         
-        buffer_append_indent(buffer);
         
         if (lua_type(L, -2) == LUA_TSTRING) {
             size_t len;
             const char *str = lua_tolstring(L, -2, &len);
-            serialize_string(buffer, str, len, 1);
+            serialize_string(buffer, str, len, 1, indent_level);
         } else {
-            serialize_value(L, buffer, -2);
+            serialize_value(L, buffer, -2, indent_level);
         }
         
-        buffer_append_string(buffer, STR_EQUALS, STR_EQUALS_LEN);
+        buffer_append_binary(buffer, STR_EQUALS, STR_EQUALS_LEN, 0);
         
-        serialize_value(L, buffer, -1);
+        serialize_value(L, buffer, -1, 0);
         
         lua_pop(L, 1);
     }
 }
 
 static void
-serialize_table(lua_State *L, buffer *buffer, int index) {
+serialize_table(lua_State *L, buffer *buffer, int index, int indent_level) {
     if (index < 0) {
         index = lua_gettop(L) + index + 1;
     }
     
     if (!lua_istable(L, index)) {
-        buffer_append_string(buffer, STR_NIL_NOT_TABLE, STR_NIL_NOT_TABLE_LEN);
+        buffer_append_binary(buffer, STR_NIL_NOT_TABLE, STR_NIL_NOT_TABLE_LEN, indent_level);
         return;
     }
     
-    buffer_append_string(buffer, STR_TABLE_BEGIN, STR_TABLE_BEGIN_LEN);
+    buffer_append_binary(buffer, STR_TABLE_BEGIN, STR_TABLE_BEGIN_LEN, indent_level);
     buffer_indent(buffer);
     
     size_t array_size = lua_rawlen(L, index);
@@ -287,50 +265,48 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
     
     serialize_hash_part(L, buffer, index, array_size, has_array);
     
-    buffer_append_string(buffer, STR_NEWLINE, STR_NEWLINE_LEN);
+    buffer_append_binary(buffer, STR_NEWLINE, STR_NEWLINE_LEN, 0);
     buffer_unindent(buffer);
-    buffer_append_indent(buffer);
-    buffer_append_string(buffer, STR_TABLE_END, STR_TABLE_END_LEN);
+    buffer_append_binary(buffer, STR_TABLE_END, STR_TABLE_END_LEN, buffer->indent_level);
 }
 
 static void
-serialize_userdata(buffer *buffer, void *p) {
+serialize_userdata(buffer *buffer, void *p, int indent_level) {
     char temp[64];
     int len = snprintf(temp, sizeof(temp), "userdata(%p)", p);
-    buffer_append_binary(buffer, temp, len);
+    buffer_append_binary(buffer, temp, len, indent_level);
 }
 
 static void
-serialize_value(lua_State *L, buffer *buffer, int index) {
+serialize_value(lua_State *L, buffer *buffer, int index, int indent_level) {
     int type = lua_type(L, index);
     
     switch (type) {
         case LUA_TNIL:
-            serialize_nil(buffer);
+            serialize_nil(buffer, indent_level);
             break;
         case LUA_TNUMBER:
-            serialize_number(L, buffer, index);
+            serialize_number(L, buffer, index, indent_level);
             break;
         case LUA_TBOOLEAN:
-            serialize_boolean(buffer, lua_toboolean(L, index));
+            serialize_boolean(buffer, lua_toboolean(L, index), indent_level);
             break;
         case LUA_TSTRING: {
             size_t len;
             const char *str = lua_tolstring(L, index, &len);
-            serialize_string(buffer, str, len, 0);
+            serialize_string(buffer, str, len, 0, indent_level);
             break;
         }
         case LUA_TTABLE:
-            serialize_table(L, buffer, index);
+            serialize_table(L, buffer, index, indent_level);
             break;
         case LUA_TLIGHTUSERDATA:
-            serialize_userdata(buffer, lua_touserdata(L, index));
+            serialize_userdata(buffer, lua_touserdata(L, index), indent_level);
             break;
         default: {
-            const char* type_name = lua_typename(L, type);
-            int len = strlen(type_name);
-            buffer_append_string(buffer, STR_UNSUPPORTED, STR_UNSUPPORTED_LEN);
-            buffer_append_binary(buffer, type_name, len);
+            // const char* type_name = lua_typename(L, type);
+            // int len = strlen(type_name);
+            // buffer_append_binary(buffer, type_name, len);
             break;
         }
     }
@@ -345,9 +321,9 @@ serialize_pretty(lua_State *L) {
     
     for (int i = 1; i <= nargs; i++) {
         if (i > 1) {
-            buffer_append_string(&buffer, STR_NEWLINE, STR_NEWLINE_LEN);
+            buffer_append_binary(&buffer, STR_SPACE, STR_SPACE_LEN, 0);
         }
-        serialize_value(L, &buffer, i);
+        serialize_value(L, &buffer, i, 0);
     }
     
     lua_pushlstring(L, buffer.data, buffer.size);
@@ -358,7 +334,6 @@ serialize_pretty(lua_State *L) {
 
 int
 luaopen_serialize(lua_State *L) {
-    // 确保缩进缓存已初始化
     init_indent_cache();
     
     luaL_Reg l[] = {
