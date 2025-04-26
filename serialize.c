@@ -169,24 +169,19 @@ serialize_number(lua_State *L, buffer *buffer, int index, int indent_level) {
 }
 
 static void
-serialize_string(buffer *buffer, const char *str, size_t len, int is_key, int indent_level) {
-    if (!is_key) {
-        // 直接向缓冲区添加引号和字符串内容
-        int spaces = indent_level * INDENT_WIDTH;
-        if (indent_level > MAX_INDENT_LEVEL) {
-            spaces = MAX_INDENT_LEVEL * INDENT_WIDTH;
-        }
-        buffer_ensure_capacity(buffer, len + spaces + 3); // 2个引号 + 内容 + 空终止符
-        memcpy(buffer->data + buffer->size, indent_cache, spaces);
-        buffer->size += spaces;
-        buffer->data[buffer->size++] = '"';
-        memcpy(buffer->data + buffer->size, str, len);
-        buffer->size += len;
-        buffer->data[buffer->size++] = '"';
-        buffer->data[buffer->size] = '\0';
-    } else {
-        buffer_append_binary(buffer, str, len, indent_level);
+serialize_string(buffer *buffer, const char *str, size_t len, int indent_level) {
+    int spaces = indent_level * INDENT_WIDTH;
+    if (indent_level > MAX_INDENT_LEVEL) {
+        spaces = MAX_INDENT_LEVEL * INDENT_WIDTH;
     }
+    buffer_ensure_capacity(buffer, len + spaces + 3); // 2个引号 + 内容 + 空终止符
+    memcpy(buffer->data + buffer->size, indent_cache, spaces);
+    buffer->size += spaces;
+    buffer->data[buffer->size++] = '"';
+    memcpy(buffer->data + buffer->size, str, len);
+    buffer->size += len;
+    buffer->data[buffer->size++] = '"';
+    buffer->data[buffer->size] = '\0';
 }
 
 static void serialize_array_part(lua_State *L, buffer *buffer, int index, size_t array_size) {
@@ -229,7 +224,7 @@ static void serialize_hash_part(lua_State *L, buffer *buffer, int index, size_t 
         if (lua_type(L, -2) == LUA_TSTRING) {
             size_t len;
             const char *str = lua_tolstring(L, -2, &len);
-            serialize_string(buffer, str, len, 1, indent_level);
+            buffer_append_binary(buffer, str, len, indent_level);
         } else {
             serialize_value(L, buffer, -2, indent_level);
         }
@@ -294,7 +289,7 @@ serialize_value(lua_State *L, buffer *buffer, int index, int indent_level) {
         case LUA_TSTRING: {
             size_t len;
             const char *str = lua_tolstring(L, index, &len);
-            serialize_string(buffer, str, len, 0, indent_level);
+            serialize_string(buffer, str, len, indent_level);
             break;
         }
         case LUA_TTABLE:
@@ -304,9 +299,9 @@ serialize_value(lua_State *L, buffer *buffer, int index, int indent_level) {
             serialize_userdata(buffer, lua_touserdata(L, index), indent_level);
             break;
         default: {
-            // const char* type_name = lua_typename(L, type);
-            // int len = strlen(type_name);
-            // buffer_append_binary(buffer, type_name, len);
+            const char* type_name = lua_typename(L, type);
+            int len = strlen(type_name);
+            buffer_append_binary(buffer, type_name, len, indent_level);
             break;
         }
     }
