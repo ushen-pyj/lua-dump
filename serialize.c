@@ -41,6 +41,7 @@
 
 static char indent_cache[MAX_INDENT_LEVEL * INDENT_WIDTH + 1];
 static int indent_cache_initialized = 0;
+static const char digit_chars[] = "0123456789";
 
 static void init_indent_cache() {
     if (!indent_cache_initialized) {
@@ -243,7 +244,7 @@ serialize_number(lua_State *L, buffer *buffer, int index) {
             temp = i;
             
             while (temp > 0) {
-                *q-- = '0' + (temp % 10);
+                *q-- = digit_chars[temp % 10];
                 temp /= 10;
             }
             
