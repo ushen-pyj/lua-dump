@@ -9,6 +9,7 @@
 #define MAX_INDENT_LEVEL 32 
 
 #define INITIAL_BUFFER_SIZE 4096
+#define CHUNK_SIZE 4096
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 #define GET_INDENT(v) (MIN(v->indent_level, MAX_INDENT_LEVEL) * INDENT_WIDTH)
@@ -51,11 +52,15 @@ static void init_indent_cache() {
 }
 
 typedef struct buffer {
-    char *data;       // 输出缓冲区
+    char *data;       // 最终输出缓冲区
     size_t size;      // 当前数据大小
     size_t capacity;  // 当前分配容量
     int indent_level; // 缩进级别
+    
+    char chunk[CHUNK_SIZE]; // 块缓冲区
+    size_t chunk_used;      // 块缓冲区已使用大小
 } buffer;
+
 
 static void
 buffer_init(buffer *buffer) {
@@ -63,10 +68,12 @@ buffer_init(buffer *buffer) {
     buffer->data = (char *)malloc(buffer->capacity);
     buffer->size = 0;
     buffer->indent_level = 0;
+    buffer->chunk_used = 0;
     if (buffer->data) {
         buffer->data[0] = '\0';
     }
 }
+
 
 static void
 buffer_free(buffer *buffer) {
@@ -76,8 +83,10 @@ buffer_free(buffer *buffer) {
     }
     buffer->size = 0;
     buffer->capacity = 0;
+    buffer->chunk_used = 0;
 }
 
+// 在使用buffer_flush_chunk之前先声明buffer_ensure_capacity
 static void
 buffer_ensure_capacity(buffer *buffer, size_t additional) {
     if (buffer->size + additional >= buffer->capacity) {
@@ -93,12 +102,38 @@ buffer_ensure_capacity(buffer *buffer, size_t additional) {
     }
 }
 
+// 将块缓冲区刷新到主缓冲区
+static void
+buffer_flush_chunk(buffer *buffer) {
+    if (buffer->chunk_used > 0) {
+        buffer_ensure_capacity(buffer, buffer->chunk_used + 1);
+        memcpy(buffer->data + buffer->size, buffer->chunk, buffer->chunk_used);
+        buffer->size += buffer->chunk_used;
+        buffer->data[buffer->size] = '\0';
+        buffer->chunk_used = 0;
+    }
+}
+
 static void
 buffer_append_binary(buffer *buffer, const void *data, size_t len) {
-    buffer_ensure_capacity(buffer, len + 1);
-    memcpy(buffer->data + buffer->size, data, len);
-    buffer->size += len;
-    buffer->data[buffer->size] = '\0';
+    // 如果数据太大无法放入块缓冲区，先刷新块缓冲区
+    if (buffer->chunk_used + len > CHUNK_SIZE) {
+        // 刷新现有块缓冲区
+        buffer_flush_chunk(buffer);
+        
+        // 对于非常大的数据，直接添加到主缓冲区
+        if (len > CHUNK_SIZE) {
+            buffer_ensure_capacity(buffer, len + 1);
+            memcpy(buffer->data + buffer->size, data, len);
+            buffer->size += len;
+            buffer->data[buffer->size] = '\0';
+            return;
+        }
+    }
+    
+    // 将数据添加到块缓冲区
+    memcpy(buffer->chunk + buffer->chunk_used, data, len);
+    buffer->chunk_used += len;
 }
 
 static void
@@ -108,18 +143,40 @@ buffer_append_binary_array(buffer *buffer, const void **data_array, const size_t
         total_len += len_array[i];
     }
     
-    buffer_ensure_capacity(buffer, total_len + 1);
-    for (size_t i = 0; i < count; i++) {
-        memcpy(buffer->data + buffer->size, data_array[i], len_array[i]);
-        buffer->size += len_array[i];
+    // 如果总数据大小无法放入块缓冲区，先刷新块缓冲区
+    if (buffer->chunk_used + total_len > CHUNK_SIZE) {
+        buffer_flush_chunk(buffer);
+        
+        // 对于非常大的数据，直接添加到主缓冲区
+        if (total_len > CHUNK_SIZE) {
+            buffer_ensure_capacity(buffer, total_len + 1);
+            for (size_t i = 0; i < count; i++) {
+                memcpy(buffer->data + buffer->size, data_array[i], len_array[i]);
+                buffer->size += len_array[i];
+            }
+            buffer->data[buffer->size] = '\0';
+            return;
+        }
     }
-    buffer->data[buffer->size] = '\0';
+    
+    // 将数据添加到块缓冲区
+    for (size_t i = 0; i < count; i++) {
+        memcpy(buffer->chunk + buffer->chunk_used, data_array[i], len_array[i]);
+        buffer->chunk_used += len_array[i];
+    }
 }
 
 static void
 buffer_append_indent(buffer *buffer) {
     int spaces = GET_INDENT(buffer);
-    buffer_append_binary(buffer, indent_cache, spaces);
+    
+    // 检查块缓冲区容量
+    if (buffer->chunk_used + spaces > CHUNK_SIZE) {
+        buffer_flush_chunk(buffer);
+    }
+    
+    memcpy(buffer->chunk + buffer->chunk_used, indent_cache, spaces);
+    buffer->chunk_used += spaces;
 }
 
 static void
@@ -152,12 +209,16 @@ serialize_boolean(buffer *buffer, int boolean) {
 
 static void
 serialize_number(lua_State *L, buffer *buffer, int index) {
+    // 确保块缓冲区有足够空间存储数字（数字转字符串最多32字节）
+    if (buffer->chunk_used + 32 > CHUNK_SIZE) {
+        buffer_flush_chunk(buffer);
+    }
+    
     if (lua_isinteger(L, index)) {
         lua_Integer i = lua_tointeger(L, index);
         
-        // 预分配足够的空间（最多32字节）
-        buffer_ensure_capacity(buffer, 32);
-        char *p = buffer->data + buffer->size;
+        // 直接在块缓冲区中构建数字字符串
+        char *p = buffer->chunk + buffer->chunk_used;
         int len = 0;
         
         if (i < 0) {
@@ -191,14 +252,11 @@ serialize_number(lua_State *L, buffer *buffer, int index) {
             p += digit_count;
         }
         
-        buffer->size += len;
-        buffer->data[buffer->size] = '\0';
+        buffer->chunk_used += len;
     } else {
-        buffer_ensure_capacity(buffer, 32);
         lua_Number n = lua_tonumber(L, index);
-        int len = snprintf(buffer->data + buffer->size, 32, "%g", n);
-        buffer->size += len;
-        buffer->data[buffer->size] = '\0';
+        int len = snprintf(buffer->chunk + buffer->chunk_used, 32, "%g", n);
+        buffer->chunk_used += len;
     }
 }
 
@@ -215,13 +273,15 @@ static void serialize_array_part(lua_State *L, buffer *buffer, int index, size_t
             const void *data_array[2] = {STR_COMMA_NEWLINE, indent_cache};
             size_t len_array[2] = {STR_COMMA_NEWLINE_LEN, GET_INDENT(buffer)};
             buffer_append_binary_array(buffer, data_array, len_array, 2);
-        } else {
+        }else{
             buffer_append_indent(buffer);
         }
+        
         
         lua_rawgeti(L, index, i);
         serialize_value(L, buffer, -1);
         lua_pop(L, 1);
+        
     }
 }
 
@@ -348,6 +408,9 @@ serialize_pretty(lua_State *L) {
         }
         serialize_value(L, &buffer, i);
     }
+    
+    // 确保所有数据都刷新到主缓冲区
+    buffer_flush_chunk(&buffer);
     
     lua_pushlstring(L, buffer.data, buffer.size);
     
