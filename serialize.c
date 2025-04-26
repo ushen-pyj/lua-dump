@@ -10,6 +10,9 @@
 
 #define INITIAL_BUFFER_SIZE 4096
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define GET_INDENT(v) (MIN(v->indent_level, MAX_INDENT_LEVEL) * INDENT_WIDTH)
+
 #define STR_NIL "nil"
 #define STR_TRUE "true"
 #define STR_FALSE "false"
@@ -101,11 +104,25 @@ buffer_append_binary(buffer *buffer, const void *data, size_t len) {
 }
 
 static void
-buffer_append_indent(buffer *buffer) {
-    int spaces = buffer->indent_level * INDENT_WIDTH;
-    if (buffer->indent_level > MAX_INDENT_LEVEL) {
-        spaces = MAX_INDENT_LEVEL * INDENT_WIDTH;
+buffer_append_binary_array(buffer *buffer, const void **data_array, const size_t *len_array, size_t count) {
+    size_t total_len = 0;
+    for (size_t i = 0; i < count; i++) {
+        total_len += len_array[i];
     }
+    
+    buffer_ensure_capacity(buffer, total_len + 1);
+    
+    for (size_t i = 0; i < count; i++) {
+        memcpy(buffer->data + buffer->size, data_array[i], len_array[i]);
+        buffer->size += len_array[i];
+    }
+    
+    buffer->data[buffer->size] = '\0';
+}
+
+static void
+buffer_append_indent(buffer *buffer) {
+    int spaces = GET_INDENT(buffer);
     buffer_ensure_capacity(buffer, spaces + 1);
     memcpy(buffer->data + buffer->size, indent_cache, spaces);
     buffer->size += spaces;
@@ -178,21 +195,27 @@ serialize_number(lua_State *L, buffer *buffer, int index) {
 
 static void
 serialize_string(buffer *buffer, const char *str, size_t len) {
-    // buffer_append_binary(buffer, STR_QUOTE, STR_QUOTE_LEN);
-    buffer_append_binary(buffer, str, len);
-    // buffer_append_binary(buffer, STR_QUOTE, STR_QUOTE_LEN);
+    const void *data_array[3] = {STR_QUOTE, str, STR_QUOTE};
+    size_t len_array[3] = {STR_QUOTE_LEN, len, STR_QUOTE_LEN};
+    buffer_append_binary_array(buffer, data_array, len_array, 3);
 }
 
 static void serialize_array_part(lua_State *L, buffer *buffer, int index, size_t array_size) {
     for (size_t i = 1; i <= array_size; i++) {
-        buffer_append_indent(buffer);
+        if (i > 1) {
+            // buffer_append_binary(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
+            const void *data_array[2] = {STR_COMMA_NEWLINE, indent_cache};
+            size_t len_array[2] = {STR_COMMA_NEWLINE_LEN, GET_INDENT(buffer)};
+            buffer_append_binary_array(buffer, data_array, len_array, 2);
+        }else{
+            buffer_append_indent(buffer);
+        }
+        
+        
         lua_rawgeti(L, index, i);
         serialize_value(L, buffer, -1);
         lua_pop(L, 1);
         
-        if (i < array_size) {
-            buffer_append_binary(buffer, STR_COMMA_NEWLINE, STR_COMMA_NEWLINE_LEN);
-        }
     }
 }
 
@@ -258,10 +281,13 @@ serialize_table(lua_State *L, buffer *buffer, int index) {
     
     serialize_hash_part(L, buffer, index, array_size, has_array);
     
-    buffer_append_binary(buffer, STR_NEWLINE, STR_NEWLINE_LEN);
     buffer_unindent(buffer);
-    buffer_append_indent(buffer);
-    buffer_append_binary(buffer, STR_TABLE_END, STR_TABLE_END_LEN);
+    // buffer_append_binary(buffer, STR_NEWLINE, STR_NEWLINE_LEN);
+    // buffer_append_indent(buffer);
+    // buffer_append_binary(buffer, STR_TABLE_END, STR_TABLE_END_LEN);
+    const void *data_array[3] = {STR_NEWLINE, indent_cache, STR_TABLE_END};
+    size_t len_array[3] = {STR_NEWLINE_LEN, GET_INDENT(buffer), STR_TABLE_END_LEN};
+    buffer_append_binary_array(buffer, data_array, len_array, 3);
 }
 
 static void
