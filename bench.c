@@ -188,10 +188,10 @@ call_dump(lua_State *L, int mod_idx, int value_idx, int mode) {
 		fprintf(stderr, "pack error: %s\n", lua_tostring(L, -1));
 		exit(1);
 	}
-	/* stack: ptr, sz */
+	/* stack: owning handle, sz */
 	len = (size_t)lua_tointeger(L, -1);
 	lua_getfield(L, mod_idx, "trash");
-	lua_pushvalue(L, -3); /* ptr */
+	lua_pushvalue(L, -3); /* handle */
 	lua_pushvalue(L, -3); /* sz */
 	lua_call(L, 2, 0);
 	lua_pop(L, 2);
