@@ -8,6 +8,7 @@
 #define MAX_DEPTH 32
 #define MAX_INDENT (MAX_DEPTH * INDENT_WIDTH)
 #define BUF_INIT 4096
+#define PRETTY_WIDTH 80
 
 static const char indent_cache[MAX_INDENT + 1] =
 	"                                "
@@ -18,6 +19,8 @@ typedef struct {
 	char *data;
 	size_t n;
 	size_t size;
+	int pretty;
+	size_t line_start;
 } dumpbuf;
 
 #define DUMP_BUF_MT "dump.buf"
@@ -61,12 +64,14 @@ lbuf_close(lua_State *L) {
 }
 
 static dumpbuf *
-buf_new(lua_State *L) {
+buf_new(lua_State *L, int pretty) {
 	dumpbuf *B = (dumpbuf *)lua_newuserdatauv(L, sizeof(*B), 0);
 	B->L = L;
 	B->data = NULL;
 	B->n = 0;
 	B->size = 0;
+	B->pretty = pretty;
+	B->line_start = 0;
 	luaL_setmetatable(L, DUMP_BUF_MT);
 	lua_toclose(L, -1);
 
@@ -138,14 +143,34 @@ buf_addch(dumpbuf *B, char c) {
 }
 
 static void
-buf_add_indent(dumpbuf *B, int depth) {
+buf_newline(dumpbuf *B, int depth) {
 	int n = depth * INDENT_WIDTH;
-	if (n > MAX_INDENT) {
-		n = MAX_INDENT;
+	buf_addch(B, '\n');
+	B->line_start = B->n;
+	buf_add(B, indent_cache, (size_t)n);
+}
+
+/* Fold a single indented line back onto the previous one. The copy is bounded
+ * by PRETTY_WIDTH, with one byte reserved for the next comma or closing brace. */
+static int
+try_join_line(dumpbuf *B, size_t split, size_t previous_line, int depth, int space) {
+	size_t used = split - previous_line;
+	size_t text, len;
+	if (B->line_start != split + 1 || used >= PRETTY_WIDTH - (size_t)space) {
+		return 0;
 	}
-	if (n > 0) {
-		buf_add(B, indent_cache, (size_t)n);
+	text = B->line_start + (size_t)depth * INDENT_WIDTH;
+	len = B->n - text;
+	if (len >= PRETTY_WIDTH - used - (size_t)space) {
+		return 0;
 	}
+	if (space) {
+		B->data[split++] = ' ';
+	}
+	memmove(B->data + split, B->data + text, len);
+	B->n = split + len;
+	B->line_start = previous_line;
+	return 1;
 }
 
 static void
@@ -224,7 +249,6 @@ dump_string(dumpbuf *B, const char *s, size_t len) {
 
 static void
 dump_key(lua_State *L, dumpbuf *B, int key, const void **path, int depth) {
-	key = lua_absindex(L, key);
 	if (lua_type(L, key) == LUA_TSTRING) {
 		size_t len;
 		const char *str = lua_tolstring(L, key, &len);
@@ -240,12 +264,40 @@ dump_key(lua_State *L, dumpbuf *B, int key, const void **path, int depth) {
 	}
 }
 
+/* Value is at -1. A keyed entry also has its key at -2. */
+static void
+dump_entry(lua_State *L, dumpbuf *B, int keyed, const void **path, int depth,
+	size_t content, int *previous_inline) {
+	size_t previous_line = B->line_start;
+	size_t split;
+	if (B->n != content) {
+		buf_addch(B, ',');
+	}
+	split = B->n;
+	if (B->pretty) {
+		buf_newline(B, depth);
+	}
+	if (keyed) {
+		dump_key(L, B, -2, path, depth);
+		if (B->pretty) {
+			buf_add(B, " = ", 3);
+		} else {
+			buf_addch(B, '=');
+		}
+	}
+	dump_value(L, B, -1, path, depth);
+	if (B->pretty) {
+		int single_line = B->line_start == split + 1;
+		if (*previous_inline && single_line) {
+			try_join_line(B, split, previous_line, depth, 1);
+		}
+		*previous_inline = single_line;
+	}
+}
+
 static void
 dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth) {
-	int type;
-
-	index = lua_absindex(L, index);
-	type = lua_type(L, index);
+	int type = lua_type(L, index);
 
 	switch (type) {
 	case LUA_TNIL:
@@ -276,10 +328,13 @@ dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth) {
 		break;
 	}
 	case LUA_TTABLE: {
-		int first = 1;
+		int previous_inline = 0;
+		size_t opening_line = B->line_start;
+		size_t content;
 		int i;
 		const void *table;
 
+		index = lua_absindex(L, index);
 		if (depth >= MAX_DEPTH) {
 			buf_add(B, "<...>", 5);
 			break;
@@ -299,7 +354,8 @@ dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth) {
 		}
 		path[depth] = table;
 
-		buf_add(B, "{\n", 2);
+		buf_addch(B, '{');
+		content = B->n;
 		if (luaL_getmetafield(L, index, "__pairs") != LUA_TNIL) {
 			lua_pushvalue(L, index);
 			lua_call(L, 1, 3); /* iter, state, key */
@@ -312,14 +368,7 @@ dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth) {
 					lua_pop(L, 5);
 					break;
 				}
-				if (!first) {
-					buf_add(B, ",\n", 2);
-				}
-				first = 0;
-				buf_add_indent(B, depth + 1);
-				dump_key(L, B, -2, path, depth + 1);
-				buf_add(B, " = ", 3);
-				dump_value(L, B, -1, path, depth + 1);
+				dump_entry(L, B, 1, path, depth + 1, content, &previous_inline);
 				lua_pop(L, 1);
 				lua_remove(L, -2);
 			}
@@ -328,13 +377,8 @@ dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth) {
 			if (array_size > 0) {
 				size_t i;
 				for (i = 1; i <= array_size; i++) {
-					if (!first) {
-						buf_add(B, ",\n", 2);
-					}
-					first = 0;
-					buf_add_indent(B, depth + 1);
 					lua_rawgeti(L, index, (lua_Integer)i);
-					dump_value(L, B, -1, path, depth + 1);
+					dump_entry(L, B, 0, path, depth + 1, content, &previous_inline);
 					lua_pop(L, 1);
 				}
 			}
@@ -347,19 +391,14 @@ dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth) {
 						continue;
 					}
 				}
-				if (!first) {
-					buf_add(B, ",\n", 2);
-				}
-				first = 0;
-				buf_add_indent(B, depth + 1);
-				dump_key(L, B, -2, path, depth + 1);
-				buf_add(B, " = ", 3);
-				dump_value(L, B, -1, path, depth + 1);
+				dump_entry(L, B, 1, path, depth + 1, content, &previous_inline);
 				lua_pop(L, 1);
 			}
 		}
-		buf_addch(B, '\n');
-		buf_add_indent(B, depth);
+		if (B->pretty && B->n != content &&
+			!try_join_line(B, content, opening_line, depth + 1, 0)) {
+			buf_newline(B, depth);
+		}
 		buf_addch(B, '}');
 
 		break;
@@ -378,9 +417,10 @@ static void
 dump_args(lua_State *L, dumpbuf *B, int nargs) {
 	int i;
 	const void *path[MAX_DEPTH];
+	int first = B->pretty ? 2 : 1;
 
-	for (i = 1; i <= nargs; i++) {
-		if (i > 1) {
+	for (i = first; i <= nargs; i++) {
+		if (i != first) {
 			buf_addch(B, ' ');
 		}
 		dump_value(L, B, i, path, 0);
@@ -390,17 +430,18 @@ dump_args(lua_State *L, dumpbuf *B, int nargs) {
 static int
 lpack(lua_State *L) {
 	int nargs = lua_gettop(L);
+	int pretty = lua_rawequal(L, 1, lua_upvalueindex(1));
 	dumpbuf *B;
 	size_t sz;
 	void *ptr;
 
-	if (nargs == 0) {
+	if (nargs == pretty) {
 		lua_pushlightuserdata(L, NULL);
 		lua_pushinteger(L, 0);
 		return 2;
 	}
 
-	B = buf_new(L);
+	B = buf_new(L, pretty);
 	dump_args(L, B, nargs);
 	if (B->n > (size_t)LUA_MAXINTEGER) {
 		return luaL_error(L, "dump: buffer overflow");
@@ -414,13 +455,14 @@ lpack(lua_State *L) {
 static int
 lpackstring(lua_State *L) {
 	int nargs = lua_gettop(L);
+	int pretty = lua_rawequal(L, 1, lua_upvalueindex(1));
 	dumpbuf *B;
 
-	if (nargs == 0) {
+	if (nargs == pretty) {
 		lua_pushliteral(L, "");
 		return 1;
 	}
-	B = buf_new(L);
+	B = buf_new(L, pretty);
 	dump_args(L, B, nargs);
 	lua_pushlstring(L, B->data, B->n);
 	return 1;
@@ -460,6 +502,10 @@ luaopen_dump(lua_State *L) {
 	lua_pushcfunction(L, lbuf_close);
 	lua_setfield(L, -2, "__gc");
 	lua_pop(L, 1);
-	luaL_newlib(L, l);
+	luaL_newlibtable(L, l);
+	lua_newtable(L);  /* Identity token: ordinary values remain valid dump arguments. */
+	lua_pushvalue(L, -1);
+	lua_setfield(L, -3, "pretty");
+	luaL_setfuncs(L, l, 1);
 	return 1;
 }

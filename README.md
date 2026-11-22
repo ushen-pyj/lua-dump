@@ -10,7 +10,9 @@ make bench         # 编译基准程序
 ```lua
 local dump = require "dump"
 
-print(dump.packstring({ a = 1, b = { 2, 3 } }))
+local t = { 1, 2, 3, 4, 5 }
+print(dump.packstring(t))               -- {1,2,3,4,5}
+print(dump.packstring(dump.pretty, t))  -- {1, 2, 3, 4, 5}
 
 local ptr, sz = dump.pack(msg)
 

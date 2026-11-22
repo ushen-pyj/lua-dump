@@ -156,7 +156,8 @@ inject_cycle(lua_State *L, int index) {
 
 enum {
 	MODE_PACKSTRING = 0,
-	MODE_PACK = 1
+	MODE_PACK = 1,
+	MODE_PRETTY = 2
 };
 
 static size_t
@@ -166,10 +167,13 @@ call_dump(lua_State *L, int mod_idx, int value_idx, int mode) {
 	mod_idx = lua_absindex(L, mod_idx);
 	value_idx = lua_absindex(L, value_idx);
 
-	if (mode == MODE_PACKSTRING) {
+	if (mode != MODE_PACK) {
 		lua_getfield(L, mod_idx, "packstring");
+		if (mode == MODE_PRETTY) {
+			lua_getfield(L, mod_idx, "pretty");
+		}
 		lua_pushvalue(L, value_idx);
-		if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+		if (lua_pcall(L, mode == MODE_PRETTY ? 2 : 1, 1, 0) != LUA_OK) {
 			fprintf(stderr, "packstring error: %s\n", lua_tostring(L, -1));
 			exit(1);
 		}
@@ -317,8 +321,9 @@ bench_wide_array(lua_State *L, int mod_idx, int mode, int n, int rounds) {
 
 static void
 run_suite(lua_State *L, int mod_idx, int mode, uint32_t seed) {
+	static const char *const names[] = { "packstring", "pack+trash", "packstring pretty" };
 	rng = seed ? seed : 1;
-	printf("--- mode=%s ---\n", mode == MODE_PACK ? "pack+trash" : "packstring");
+	printf("--- mode=%s ---\n", names[mode]);
 
 	bench_large(L, mod_idx, mode, 5, 12, 50);
 	bench_wide_array(L, mod_idx, mode, 100000, 20);
@@ -353,6 +358,7 @@ main(int argc, char **argv) {
 	printf("=== lua-dump bench (seed=0x%x) ===\n\n", seed);
 	run_suite(L, mod_idx, MODE_PACKSTRING, seed);
 	run_suite(L, mod_idx, MODE_PACK, seed);
+	run_suite(L, mod_idx, MODE_PRETTY, seed);
 
 	lua_close(L);
 	return 0;
