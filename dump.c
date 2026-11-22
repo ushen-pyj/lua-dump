@@ -23,7 +23,7 @@ typedef struct {
 #define DUMP_BUF_MT "dump.buf"
 
 static int
-is_ident_char(unsigned char c) {
+is_ident_start(unsigned char c) {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
 }
 
@@ -33,12 +33,12 @@ is_ident(const char *s, size_t len) {
 	if (len == 0) {
 		return 0;
 	}
-	if (!is_ident_char((unsigned char)s[0])) {
+	if (!is_ident_start((unsigned char)s[0])) {
 		return 0;
 	}
 	for (i = 1; i < len; i++) {
 		unsigned char c = (unsigned char)s[i];
-		if (!(is_ident_char(c) || (c >= '0' && c <= '9'))) {
+		if (!(is_ident_start(c) || (c >= '0' && c <= '9'))) {
 			return 0;
 		}
 	}
@@ -46,7 +46,7 @@ is_ident(const char *s, size_t len) {
 }
 
 static void
-buf_clear(dumpbuf *B) {
+buf_release(dumpbuf *B) {
 	free(B->data);
 	B->data = NULL;
 	B->n = 0;
@@ -54,9 +54,9 @@ buf_clear(dumpbuf *B) {
 }
 
 static int
-lbuf_gc(lua_State *L) {
-	dumpbuf *B = (dumpbuf *)lua_touserdata(L, 1);
-	buf_clear(B);
+lbuf_close(lua_State *L) {
+	dumpbuf *B = (dumpbuf *)luaL_checkudata(L, 1, DUMP_BUF_MT);
+	buf_release(B);
 	return 0;
 }
 
@@ -67,23 +67,15 @@ buf_new(lua_State *L) {
 	B->data = NULL;
 	B->n = 0;
 	B->size = 0;
-	if (luaL_newmetatable(L, DUMP_BUF_MT)) {
-		lua_pushcfunction(L, lbuf_gc);
-		lua_setfield(L, -2, "__gc");
-	}
-	lua_setmetatable(L, -2);
+	luaL_setmetatable(L, DUMP_BUF_MT);
+	lua_toclose(L, -1);
 
-	B->size = BUF_INIT;
-	B->data = (char *)malloc(B->size);
+	B->data = (char *)malloc(BUF_INIT);
 	if (B->data == NULL) {
 		luaL_error(L, "dump: out of memory");
 	}
+	B->size = BUF_INIT;
 	return B;
-}
-
-static void
-buf_free(dumpbuf *B) {
-	buf_clear(B);
 }
 
 static void *
@@ -107,7 +99,6 @@ buf_grow(dumpbuf *B, size_t need) {
 	size_t newsize = B->size;
 	char *p;
 	if (need > (size_t)-1 - B->n) {
-		buf_clear(B);
 		luaL_error(B->L, "dump: buffer overflow");
 	}
 	while (B->n + need > newsize) {
@@ -119,19 +110,19 @@ buf_grow(dumpbuf *B, size_t need) {
 	}
 	p = (char *)realloc(B->data, newsize);
 	if (p == NULL) {
-		buf_clear(B);
 		luaL_error(B->L, "dump: out of memory");
 	}
 	B->data = p;
 	B->size = newsize;
 }
 
+/* s must not point into B->data: growth can move the allocation. */
 static void
 buf_add(dumpbuf *B, const char *s, size_t len) {
 	if (len == 0) {
 		return;
 	}
-	if (B->n + len > B->size) {
+	if (len > B->size - B->n) {
 		buf_grow(B, len);
 	}
 	memcpy(B->data + B->n, s, len);
@@ -140,7 +131,7 @@ buf_add(dumpbuf *B, const char *s, size_t len) {
 
 static void
 buf_addch(dumpbuf *B, char c) {
-	if (B->n + 1 > B->size) {
+	if (B->n == B->size) {
 		buf_grow(B, 1);
 	}
 	B->data[B->n++] = c;
@@ -180,7 +171,7 @@ buf_add_int(dumpbuf *B, lua_Integer v) {
 	buf_add(B, p, (size_t)(tmp + sizeof(tmp) - p));
 }
 
-static void dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth);
+static void dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth);
 
 static int
 need_escape(unsigned char c) {
@@ -221,9 +212,9 @@ dump_string(dumpbuf *B, const char *s, size_t len) {
 			buf_add(B, "\\\\", 2);
 			break;
 		default: {
-			char hex[8];
-			int n = sprintf(hex, "\\x%02x", c);
-			buf_add(B, hex, (size_t)n);
+			static const char digits[] = "0123456789abcdef";
+			char hex[] = { '\\', 'x', digits[c >> 4], digits[c & 15] };
+			buf_add(B, hex, sizeof(hex));
 			break;
 		}
 		}
@@ -232,7 +223,7 @@ dump_string(dumpbuf *B, const char *s, size_t len) {
 }
 
 static void
-dump_key(lua_State *L, dumpbuf *B, int key, int visited, int depth) {
+dump_key(lua_State *L, dumpbuf *B, int key, const void **path, int depth) {
 	key = lua_absindex(L, key);
 	if (lua_type(L, key) == LUA_TSTRING) {
 		size_t len;
@@ -244,17 +235,16 @@ dump_key(lua_State *L, dumpbuf *B, int key, int visited, int depth) {
 		}
 	} else {
 		buf_addch(B, '[');
-		dump_value(L, B, key, visited, depth);
+		dump_value(L, B, key, path, depth);
 		buf_addch(B, ']');
 	}
 }
 
 static void
-dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
+dump_value(lua_State *L, dumpbuf *B, int index, const void **path, int depth) {
 	int type;
 
 	index = lua_absindex(L, index);
-	visited = lua_absindex(L, visited);
 	type = lua_type(L, index);
 
 	switch (type) {
@@ -287,6 +277,8 @@ dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
 	}
 	case LUA_TTABLE: {
 		int first = 1;
+		int i;
+		const void *table;
 
 		if (depth >= MAX_DEPTH) {
 			buf_add(B, "<...>", 5);
@@ -297,18 +289,15 @@ dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
 			break;
 		}
 
-		lua_pushvalue(L, index);
-		lua_rawget(L, visited);
-		if (!lua_isnil(L, -1)) {
-			lua_pop(L, 1);
-			buf_add(B, "<cycle>", 7);
-			break;
+		/* Ancestors stay rooted on the Lua stack, including across __pairs calls. */
+		table = lua_topointer(L, index);
+		for (i = 0; i < depth; i++) {
+			if (path[i] == table) {
+				buf_add(B, "<cycle>", 7);
+				return;
+			}
 		}
-		lua_pop(L, 1);
-
-		lua_pushvalue(L, index);
-		lua_pushboolean(L, 1);
-		lua_rawset(L, visited);
+		path[depth] = table;
 
 		buf_add(B, "{\n", 2);
 		if (luaL_getmetafield(L, index, "__pairs") != LUA_TNIL) {
@@ -328,9 +317,9 @@ dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
 				}
 				first = 0;
 				buf_add_indent(B, depth + 1);
-				dump_key(L, B, -2, visited, depth + 1);
+				dump_key(L, B, -2, path, depth + 1);
 				buf_add(B, " = ", 3);
-				dump_value(L, B, -1, visited, depth + 1);
+				dump_value(L, B, -1, path, depth + 1);
 				lua_pop(L, 1);
 				lua_remove(L, -2);
 			}
@@ -345,15 +334,15 @@ dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
 					first = 0;
 					buf_add_indent(B, depth + 1);
 					lua_rawgeti(L, index, (lua_Integer)i);
-					dump_value(L, B, -1, visited, depth + 1);
+					dump_value(L, B, -1, path, depth + 1);
 					lua_pop(L, 1);
 				}
 			}
 			lua_pushnil(L);
 			while (lua_next(L, index) != 0) {
-				if (lua_type(L, -2) == LUA_TNUMBER && lua_isinteger(L, -2)) {
+				if (lua_isinteger(L, -2)) {
 					lua_Integer k = lua_tointeger(L, -2);
-					if (k >= 1 && (size_t)k <= array_size) {
+					if (k >= 1 && (lua_Unsigned)k <= array_size) {
 						lua_pop(L, 1);
 						continue;
 					}
@@ -363,9 +352,9 @@ dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
 				}
 				first = 0;
 				buf_add_indent(B, depth + 1);
-				dump_key(L, B, -2, visited, depth + 1);
+				dump_key(L, B, -2, path, depth + 1);
 				buf_add(B, " = ", 3);
-				dump_value(L, B, -1, visited, depth + 1);
+				dump_value(L, B, -1, path, depth + 1);
 				lua_pop(L, 1);
 			}
 		}
@@ -373,9 +362,6 @@ dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
 		buf_add_indent(B, depth);
 		buf_addch(B, '}');
 
-		lua_pushvalue(L, index);
-		lua_pushnil(L);
-		lua_rawset(L, visited);
 		break;
 	}
 	default: {
@@ -391,52 +377,52 @@ dump_value(lua_State *L, dumpbuf *B, int index, int visited, int depth) {
 static void
 dump_args(lua_State *L, dumpbuf *B, int nargs) {
 	int i;
-	int visited;
-
-	lua_newtable(L);
-	visited = lua_gettop(L);
+	const void *path[MAX_DEPTH];
 
 	for (i = 1; i <= nargs; i++) {
 		if (i > 1) {
 			buf_addch(B, ' ');
 		}
-		dump_value(L, B, i, visited, 0);
+		dump_value(L, B, i, path, 0);
 	}
-
-	lua_remove(L, visited);
 }
 
 static int
 lpack(lua_State *L) {
 	int nargs = lua_gettop(L);
-	dumpbuf *B = buf_new(L);
+	dumpbuf *B;
 	size_t sz;
 	void *ptr;
 
-	dump_args(L, B, nargs);
-
-	if (B->n == 0) {
-		buf_free(B);
+	if (nargs == 0) {
 		lua_pushlightuserdata(L, NULL);
 		lua_pushinteger(L, 0);
 		return 2;
 	}
 
+	B = buf_new(L);
+	dump_args(L, B, nargs);
+	if (B->n > (size_t)LUA_MAXINTEGER) {
+		return luaL_error(L, "dump: buffer overflow");
+	}
 	ptr = buf_detach(B, &sz);
 	lua_pushlightuserdata(L, ptr);
 	lua_pushinteger(L, (lua_Integer)sz);
-	/* 所有权移交调用方；box userdata 由返回后 GC，data 已 detach */
 	return 2;
 }
 
 static int
 lpackstring(lua_State *L) {
 	int nargs = lua_gettop(L);
-	dumpbuf *B = buf_new(L);
+	dumpbuf *B;
 
+	if (nargs == 0) {
+		lua_pushliteral(L, "");
+		return 1;
+	}
+	B = buf_new(L);
 	dump_args(L, B, nargs);
 	lua_pushlstring(L, B->data, B->n);
-	buf_free(B);
 	return 1;
 }
 
@@ -467,6 +453,13 @@ luaopen_dump(lua_State *L) {
 	};
 
 	luaL_checkversion(L);
+	luaL_newmetatable(L, DUMP_BUF_MT);
+	lua_pushcfunction(L, lbuf_close);
+	lua_setfield(L, -2, "__close");
+	/* A failed coroutine may be collected without coroutine.close. */
+	lua_pushcfunction(L, lbuf_close);
+	lua_setfield(L, -2, "__gc");
+	lua_pop(L, 1);
 	luaL_newlib(L, l);
 	return 1;
 }

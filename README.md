@@ -1,5 +1,11 @@
 # lua-dump
+```sh
+make test          # 构建 dump.so 并运行 test.lua
+make bench         # 编译基准程序
+./bench            # 运行基准
+```
 
+## 用法
 
 ```lua
 local dump = require "dump"

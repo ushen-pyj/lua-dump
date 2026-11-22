@@ -34,6 +34,16 @@ eq(dump.packstring("a\nb"), '"a\\nb"', "nl")
 eq(dump.packstring("a\tb\r\"\\"), '"a\\tb\\r\\"\\\\"', "esc")
 eq(dump.packstring(string.char(0, 1, 127)), '"\\x00\\x01\\x7f"', "ctrl")
 
+-- Cross the initial buffer boundary with ordinary bytes and an escape.
+for _, n in ipairs { 4093, 4094, 4095, 16384 } do
+	local prefix = string.rep("a", n)
+	local expected = '"' .. prefix .. '\\x1f"'
+	eq(dump.packstring(prefix .. "\31"), expected, "buffer growth")
+	local ptr, size = dump.pack(prefix .. "\31")
+	eq(size, #expected, "detached buffer size")
+	dump.trash(ptr, size)
+end
+
 -- empty / nested table
 eq(dump.packstring({}), "{\n\n}", "empty table")
 local t = { 1, 2, a = { b = 3 } }
@@ -53,6 +63,16 @@ check(dump.packstring({ [true] = 1 }):find("[true] = 1", 1, true), "bool key")
 local c = { x = 1 }
 c.self = c
 check(dump.packstring(c):find("<cycle>", 1, true), "cycle marker")
+
+-- A shared table is a cycle only while it is an ancestor.
+do
+	local shared = { 7 }
+	local pair = "{\n  {\n    7\n  },\n  {\n    7\n  }\n}"
+	eq(dump.packstring({shared, shared}, shared), pair .. " {\n  7\n}", "shared table")
+	local key = {}
+	key[key] = 1
+	eq(dump.packstring(key), "{\n  [<cycle>] = 1\n}", "self as key")
+end
 
 -- table as key
 local k = { 1 }
@@ -119,7 +139,7 @@ do
 	check(ps:find("<cycle>", 1, true), "__pairs cycle")
 end
 
--- metamethod 抛错须原样传播（缓冲由 __gc 兜底回收）
+-- metamethod 抛错须原样传播
 do
 	local boom = setmetatable({ 1, 2, x = "y" }, {
 		__pairs = function()
@@ -128,6 +148,40 @@ do
 	})
 	check_err(function() dump.packstring(boom) end, "pairs-boom")
 	check_err(function() dump.pack(boom) end, "pairs-boom")
+end
+
+-- The iterator re-enters dump with the same table while the outer call owns a buffer.
+do
+	local nested = false
+	local proxy = setmetatable({}, {
+		__pairs = function(t)
+			if nested then
+				return next, { inner = 1 }, nil
+			end
+			nested = true
+			local inner = dump.packstring(t)
+			nested = false
+			eq(inner, "{\n  inner = 1\n}", "reentrant traversal")
+			return next, { outer = t }, nil
+		end,
+	})
+	eq(dump.packstring(proxy), "{\n  outer = <cycle>\n}", "outer traversal")
+end
+
+do
+	local marker = {}
+	local proxy = setmetatable({}, {
+		__pairs = function()
+			return function(_, prev)
+				if prev == nil then return 1, string.rep("x", 8192) end
+				error(marker, 0)
+			end
+		end,
+	})
+	for _, pack in ipairs { dump.pack, dump.packstring } do
+		local ok, err = pcall(pack, proxy)
+		check(not ok and err == marker, "iterator error after growth")
+	end
 end
 
 -- pack / trash

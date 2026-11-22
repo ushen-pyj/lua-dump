@@ -1,39 +1,20 @@
-LUA_INC ?= $(HOME)/AppData/Local/Programs/Lua/include
-LUA_LIB ?= $(HOME)/AppData/Local/Programs/Lua/lib
-CC = gcc
+CFLAGS ?= -O2 -Wall -Wextra
+LUA ?= lua5.4
+LUA_CFLAGS ?= $(if $(LUA_INC),-I$(LUA_INC),$(shell pkg-config --cflags lua5.4))
+LUA_LIBS ?= $(if $(LUA_LIB),-L$(LUA_LIB) -llua -lm -ldl,$(shell pkg-config --libs lua5.4))
 
-UNAME_S := $(shell uname -s 2>/dev/null || echo Windows)
+.PHONY: all test clean
 
-ifneq (,$(filter $(UNAME_S),Linux Darwin))
-  TARGET = dump.so
-  CCFLAGS = -Wall -O2 -fPIC -shared -I$(LUA_INC)
-  LIBS =
-  BENCH = bench
-  BENCH_FLAGS = -Wall -O2 -I$(LUA_INC)
-  BENCH_LIBS = -L$(LUA_LIB) -llua -lm
-  ifeq ($(UNAME_S),Linux)
-    BENCH_LIBS += -ldl
-  endif
-else
-  TARGET = dump.dll
-  CCFLAGS = -Wall -O2 -shared -I"$(LUA_INC)"
-  LIBS = -L"$(LUA_LIB)" -llua54
-  BENCH = bench.exe
-  BENCH_FLAGS = -Wall -O2 -I"$(LUA_INC)"
-  BENCH_LIBS = -L"$(LUA_LIB)" -llua54
-endif
+all: dump.so
 
-all: $(TARGET)
+dump.so: dump.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LUA_CFLAGS) -fPIC -shared $(LDFLAGS) -o $@ $< $(LDLIBS)
 
-$(TARGET): dump.c
-	$(CC) $(CCFLAGS) -o $@ $^ $(LIBS)
+test: dump.so
+	LUA_CPATH_5_4='./?.so' $(LUA) test.lua
 
-bench: $(BENCH)
-
-$(BENCH): bench.c dump.c
-	$(CC) $(BENCH_FLAGS) -o $@ bench.c dump.c $(BENCH_LIBS)
+bench: bench.c dump.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LUA_CFLAGS) $(LDFLAGS) -o $@ $^ $(LUA_LIBS) $(LDLIBS)
 
 clean:
-	rm -f dump.so dump.dll bench bench.exe
-
-.PHONY: all bench clean
+	$(RM) dump.so bench

@@ -4,34 +4,18 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <stdint.h>
-
-#ifdef _WIN32
-#include <windows.h>
-#else
 #include <time.h>
-#endif
 
 int luaopen_dump(lua_State *L);
 
 /* ---- 计时 ---- */
 
 static double
-now_sec(void) {
-#ifdef _WIN32
-	static LARGE_INTEGER freq;
-	LARGE_INTEGER c;
-	if (freq.QuadPart == 0) {
-		QueryPerformanceFrequency(&freq);
-	}
-	QueryPerformanceCounter(&c);
-	return (double)c.QuadPart / (double)freq.QuadPart;
-#else
+monotonic_seconds(void) {
 	struct timespec ts;
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
-#endif
 }
 
 /* ---- RNG ---- */
@@ -239,11 +223,11 @@ bench_large(lua_State *L, int mod_idx, int mode, int depth, int breadth, int rou
 	/* warmup */
 	(void)call_dump(L, mod_idx, table_idx, mode);
 
-	t0 = now_sec();
+	t0 = monotonic_seconds();
 	for (i = 0; i < rounds; i++) {
 		total_out += call_dump(L, mod_idx, table_idx, mode);
 	}
-	t1 = now_sec();
+	t1 = monotonic_seconds();
 
 	print_result("large", total_out, t1 - t0, rounds);
 	printf("            avg out/dump = %.2f KB\n",
@@ -280,13 +264,13 @@ bench_throughput(lua_State *L, int mod_idx, int mode, int n_tables, int depth, i
 		lua_pop(L, 1);
 	}
 
-	t0 = now_sec();
+	t0 = monotonic_seconds();
 	for (i = 0; i < iters; i++) {
 		lua_rawgeti(L, bag, (i % n_tables) + 1);
 		total_out += call_dump(L, mod_idx, -1, mode);
 		lua_pop(L, 1);
 	}
-	t1 = now_sec();
+	t1 = monotonic_seconds();
 
 	print_result("thruput", total_out, t1 - t0, iters);
 	lua_settop(L, base);
@@ -322,11 +306,11 @@ bench_wide_array(lua_State *L, int mod_idx, int mode, int n, int rounds) {
 	printf("[array]     len=%d rounds=%d\n", n, rounds);
 
 	(void)call_dump(L, mod_idx, table_idx, mode);
-	t0 = now_sec();
+	t0 = monotonic_seconds();
 	for (i = 0; i < rounds; i++) {
 		total_out += call_dump(L, mod_idx, table_idx, mode);
 	}
-	t1 = now_sec();
+	t1 = monotonic_seconds();
 	print_result("array", total_out, t1 - t0, rounds);
 	lua_pop(L, 1);
 }
